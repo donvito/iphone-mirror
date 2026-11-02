@@ -1,0 +1,91 @@
+# Builds the Windows and macOS apps. Pushing a tag like v0.1.0 publishes a
+# GitHub release with both zips; running it manually only uploads artifacts.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025 # has MinGW gcc + windres for cgo and the manifest resource
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Toolchain
+        run: |
+          go version
+          gcc --version
+      - name: Test
+        run: go test -short ./...
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev" }
+          New-Item -ItemType Directory -Force pkg/iPhoneMirror | Out-Null
+          Copy-Item dist/iPhoneMirror.exe, setup-firewall.ps1, README.md pkg/iPhoneMirror/
+          Compress-Archive -Path pkg/iPhoneMirror -DestinationPath "iPhoneMirror-$v-windows-x64.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: iPhoneMirror-*-windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -short ./...
+      - name: Build
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] || v=0.0.0-dev
+          VERSION="$v" ./build.sh
+      - name: Package
+        run: |
+          v="$GITHUB_REF_NAME"
+          [ "$GITHUB_REF_TYPE" = tag ] || v=dev
+          codesign --verify --deep --strict "dist/iPhone Mirror.app"
+          ditto -c -k --keepParent "dist/iPhone Mirror.app" "iPhoneMirror-$v-macos.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: iPhoneMirror-*-macos.zip
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" *.zip SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" \
+            --title "iPhone Mirror $GITHUB_REF_NAME" --notes-file ../.github/release-notes.md --generate-notes

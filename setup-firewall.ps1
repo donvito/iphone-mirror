@@ -1,8 +1,13 @@
 # Allows iPhone Mirror through Windows Defender Firewall (needs admin; will ask to elevate).
 # The iPhone must be able to reach this PC on: UDP 5353 (discovery), TCP 7000 (AirPlay)
 # and a few random TCP/UDP ports for the video stream, so the rule is per-program.
-param([string]$ExePath = (Join-Path $PSScriptRoot "dist\iPhoneMirror.exe"))
+param([string]$ExePath = "")
 
+if (-not $ExePath) {
+    # Release zip: the exe is next to this script. Source checkout: dist\ after .\build.ps1.
+    $ExePath = Join-Path $PSScriptRoot "iPhoneMirror.exe"
+    if (-not (Test-Path $ExePath)) { $ExePath = Join-Path $PSScriptRoot "dist\iPhoneMirror.exe" }
+}
 $ExePath = [IO.Path]::GetFullPath($ExePath)
 if (-not (Test-Path $ExePath)) {
     Write-Error "Not found: $ExePath (build it first with .\build.ps1, or pass -ExePath)"

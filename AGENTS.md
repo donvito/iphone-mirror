@@ -8,6 +8,8 @@ One module; OS-specific code is selected by `_windows` / `_darwin` filename suff
 - macOS app: `./build.sh` (-> `dist/iPhone Mirror.app`, universal; `ARCHS=arm64 ./build.sh` for a faster local build)
 - macOS env for plain `go` commands (a mismatched Command Line Tools SDK may otherwise fail to link / spam ld warnings):
   `export SDKROOT=$(xcrun --sdk macosx --show-sdk-path) CGO_CFLAGS="-O2 -mmacosx-version-min=14.0" CGO_LDFLAGS="-mmacosx-version-min=14.0"`
+- Release: push a tag `vX.Y.Z`; `.github/workflows/release.yml` builds on windows-2025 + macos-15 and publishes a GitHub release
+  (notes from `.github/release-notes.md` + generated). `gh workflow run release.yml` builds artifacts only (dry run).
 - Tests: `go test ./...` (needs `ffmpeg` with libx264/libx265 on PATH; `-short` skips the Windows latency test)
 - Lint: `gofmt -l .` and `go vet ./...`
 - Type-check the Windows build from a Mac (no MinGW): stub out the cgo FairPlay file with an overlay, e.g.
