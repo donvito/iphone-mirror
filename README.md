@@ -35,18 +35,28 @@ On the iPhone: **Control Center → Screen Mirroring → pick your PC's name**.
 
 The window title stays `iPhone Mirror`, so OBS finds it again after a restart.
 
-## Options
+## Settings
 
-```
-iPhoneMirror.exe [-name "My PC"] [-res 3840x2160] [-fps 60] [-h264] [-hide-status] [-port 7000]
-```
+Right‑click the mirror window (or press Shift+F10) for the menu:
 
-- `-name`: the name shown on the iPhone (defaults to the computer name).
-- `-res`: the resolution requested from the phone. The **height** decides the stream size. The default
-  4K request makes an iPhone 15 Pro Max send HEVC at about 998×2160 in portrait (~50 fps).
-- `-h264`: only accept H.264. This caps the stream at 1080 pixels high (about 498×1080 in portrait) but
-  uses less CPU.
-- `-hide-status`: shows a plain black window instead of the instructions while no phone is connected.
+- **Settings…**
+  - **Name shown on the iPhone:** defaults to the computer name.
+  - **Quality:** *High* (HEVC, up to 2160p; an iPhone 15 Pro Max sends about 998×2160 at ~50 fps) or
+    *Compatible* (H.264, up to 1080p; about 498×1080, less CPU).
+  - **Maximum frame rate:** 60 or 30 fps.
+  - **Show instructions while no iPhone is connected:** turn off for a plain black window.
+  - **Keep window on top of other windows**
+- **Fit window to phone:** the same as double‑clicking the window.
+- **Keep window on top**
+- **Open log folder**
+- **Exit**
+
+Settings are saved to `%APPDATA%\iPhoneMirror\settings.json`. Changing the name, quality or frame rate
+restarts the receiver, which briefly disconnects the iPhone.
+
+Command‑line flags override the saved settings for one run (they're useful for scripts):
+`-name`, `-h264`, `-fps`, `-hide-status`, `-debug` (logs mDNS traffic), `-port`, and the advanced
+`-res WxH`.
 
 Logs are written to `%APPDATA%\iPhoneMirror\log.txt`.
 

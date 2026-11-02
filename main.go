@@ -22,16 +22,12 @@ import (
 
 	"github.com/melvi/iphone-win-obs/internal/airplay"
 	"github.com/melvi/iphone-win-obs/internal/mdns"
+	"github.com/melvi/iphone-win-obs/internal/settings"
 	"github.com/melvi/iphone-win-obs/internal/ui"
 	"github.com/melvi/iphone-win-obs/internal/video"
 )
 
 const windowTitle = "iPhone Mirror"
-
-var (
-	cleanupMu sync.Mutex
-	cleanup   func()
-)
 
 type identity struct {
 	Seed   string `json:"seed"`
@@ -74,47 +70,159 @@ func loadIdentity(dir string) (ed25519.PrivateKey, net.HardwareAddr, error) {
 	return ed25519.NewKeyFromSeed(seed), hw, nil
 }
 
-// glue connects the AirPlay receiver to the decoder and the window.
-type glue struct {
-	win     *ui.Window
-	dec     *video.Decoder
-	log     *log.Logger
-	waiting string
+// app ties the AirPlay receiver, decoder, window and settings together.
+type app struct {
+	dir   string
+	log   *log.Logger
+	win   *ui.Window
+	dec   *video.Decoder
+	key   ed25519.PrivateKey
+	hw    net.HardwareAddr
+	port  int
+	debug bool
+	resW  int // -res override (0 = derive from settings)
+	resH  int
+
+	mu  sync.Mutex
+	cur settings.Settings
+
+	restartMu sync.Mutex // serializes receiver restarts
+	srv       *airplay.Server
+	resp      *mdns.Responder
 }
 
-func (g *glue) MirrorStarted(client string) {
-	g.log.Printf("mirroring started from %s", client)
-	g.dec.Stop() // fresh decoder per session, even if the size matches the previous one
-	if g.waiting != "" {
-		g.win.SetStatus("iPhone connected (" + client + ")\n\nStarting video…")
+func (a *app) settings() settings.Settings {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cur
+}
+
+func (a *app) waitingText() string {
+	s := a.settings()
+	if !s.ShowStatus {
+		return ""
+	}
+	return fmt.Sprintf("Waiting for iPhone…\n\nOn your iPhone, open Control Center, tap Screen Mirroring and choose “%s”.\n\n"+
+		"The iPhone and this PC must be on the same network.\n\nRight-click this window for settings.", s.Name)
+}
+
+func (a *app) MirrorStarted(client string) {
+	a.log.Printf("mirroring started from %s", client)
+	a.dec.Stop() // fresh decoder per session, even if the size matches the previous one
+	if a.settings().ShowStatus {
+		a.win.SetStatus("iPhone connected (" + client + ")\n\nStarting video…")
 	}
 }
 
-func (g *glue) CodecConfig(codec string, paramSets [][]byte) {
-	if err := g.dec.Configure(codec, paramSets); err != nil {
-		g.log.Printf("decoder: %v", err)
+func (a *app) CodecConfig(codec string, paramSets [][]byte) {
+	if err := a.dec.Configure(codec, paramSets); err != nil {
+		a.log.Printf("decoder: %v", err)
 	}
 }
 
-func (g *glue) VideoData(annexB []byte) {
-	g.dec.Write(annexB)
+func (a *app) VideoData(annexB []byte) {
+	a.dec.Write(annexB)
 }
 
-func (g *glue) MirrorStopped() {
-	g.dec.Stop()
-	g.win.ClearFrame()
-	g.win.SetStatus(g.waiting)
+func (a *app) MirrorStopped() {
+	a.dec.Stop()
+	a.win.ClearFrame()
+	a.win.SetStatus(a.waitingText())
+}
+
+// apply is called from the settings UI (on the UI thread).
+func (a *app) apply(s settings.Settings) {
+	s = s.Normalize()
+	a.mu.Lock()
+	old := a.cur
+	a.cur = s
+	a.mu.Unlock()
+	if err := settings.Save(a.dir, s); err != nil {
+		a.log.Printf("settings: save failed: %v", err)
+	}
+	a.log.Printf("settings: %+v", s)
+	if s.AlwaysOnTop != old.AlwaysOnTop {
+		a.win.SetAlwaysOnTop(s.AlwaysOnTop)
+	}
+	if s.Name != old.Name || s.HEVC != old.HEVC || s.FPS != old.FPS {
+		go func() {
+			if err := a.restartReceiver(); err != nil {
+				a.fail(err)
+			}
+		}()
+	} else if s.ShowStatus != old.ShowStatus {
+		a.win.SetStatus(a.waitingText())
+	}
+}
+
+func (a *app) fail(err error) {
+	a.log.Printf("error: %v", err)
+	a.win.SetStatus("Error: " + err.Error() + "\n\nSee log: " + filepath.Join(a.dir, "log.txt"))
+}
+
+// restartReceiver stops the AirPlay service (disconnecting any phone) and
+// starts it again with the current settings.
+func (a *app) restartReceiver() error {
+	a.restartMu.Lock()
+	defer a.restartMu.Unlock()
+	a.stopLocked()
+	return a.startLocked()
+}
+
+func (a *app) stopLocked() {
+	if a.resp != nil {
+		a.resp.Close()
+		a.resp = nil
+	}
+	if a.srv != nil {
+		a.srv.Close()
+		a.srv = nil
+	}
+	a.dec.Stop()
+}
+
+func (a *app) startLocked() error {
+	s := a.settings()
+	w, h := s.Resolution()
+	if a.resW > 0 {
+		w, h = a.resW, a.resH
+	}
+	srv := airplay.NewServer(airplay.Config{
+		Name: s.Name, HWAddr: a.hw, Identity: a.key, HEVC: s.HEVC,
+		Width: w, Height: h, FPS: s.FPS, Port: a.port, Log: a.log,
+	}, a)
+	if err := srv.Listen(); err != nil {
+		return fmt.Errorf("cannot listen on port %d (is another AirPlay receiver running?): %w", a.port, err)
+	}
+	resp, err := mdns.Start("iPhoneMirror-"+hex.EncodeToString(a.hw[3:]), []mdns.Service{
+		{Instance: s.Name, Type: "_airplay._tcp", Port: a.port, TXT: srv.AirPlayTXT()},
+		{Instance: srv.RAOPInstanceName(), Type: "_raop._tcp", Port: a.port, TXT: srv.RAOPTXT()},
+	}, a.log, a.debug)
+	if err != nil {
+		srv.Close()
+		return fmt.Errorf("mDNS: %w", err)
+	}
+	a.srv, a.resp = srv, resp
+	go func() {
+		if err := srv.Serve(); err != nil {
+			a.fail(fmt.Errorf("AirPlay server: %w", err))
+		}
+	}()
+	a.win.ClearFrame()
+	a.win.SetStatus(a.waitingText())
+	a.log.Printf("AirPlay receiver %q ready on port %d (device id %s, requesting %dx%d@%d, hevc=%v)",
+		s.Name, a.port, srv.DeviceID(), w, h, s.FPS, s.HEVC)
+	return nil
 }
 
 func main() {
-	host, _ := os.Hostname()
-	name := flag.String("name", host, "name shown in the iPhone's Screen Mirroring list")
-	res := flag.String("res", "", "requested resolution WxH; the height decides the stream size (default 3840x2160, or 1920x1080 with -h264)")
-	h264Only := flag.Bool("h264", false, "only accept H.264 (limits the stream to 1080 pixels high)")
-	fps := flag.Int("fps", 60, "maximum frame rate requested from the iPhone")
+	name := flag.String("name", "", "name shown in the iPhone's Screen Mirroring list (overrides settings)")
+	res := flag.String("res", "", "advanced: requested resolution WxH; the height decides the stream size")
+	h264Only := flag.Bool("h264", false, "only accept H.264, up to 1080p (overrides settings)")
+	fps := flag.Int("fps", 0, "maximum frame rate requested from the iPhone, 30 or 60 (overrides settings)")
 	port := flag.Int("port", 7000, "AirPlay TCP port")
 	debug := flag.Bool("debug", false, "log every mDNS packet received (for troubleshooting discovery)")
-	hideStatus := flag.Bool("hide-status", false, "show a plain black window instead of instructions while no iPhone is connected")
+	hideStatus := flag.Bool("hide-status", false, "plain black window while no iPhone is connected (overrides settings)")
 	flag.Parse()
 
 	dir := appDir()
@@ -125,77 +233,57 @@ func main() {
 	}
 	logger := log.New(out, "", log.LstdFlags|log.Lmicroseconds)
 
-	win := ui.New(windowTitle)
-	waiting := fmt.Sprintf("Waiting for iPhone…\n\nOn your iPhone, open Control Center, tap Screen Mirroring and choose “%s”.\n\n"+
-		"The iPhone and this PC must be on the same network.", *name)
-	if *hideStatus {
-		waiting = ""
+	// Command-line flags override the saved settings for this run only.
+	cur := settings.Load(dir)
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "name":
+			cur.Name = *name
+		case "h264":
+			cur.HEVC = !*h264Only
+		case "fps":
+			cur.FPS = *fps
+		case "hide-status":
+			cur.ShowStatus = !*hideStatus
+		}
+	})
+	a := &app{dir: dir, log: logger, win: ui.New(windowTitle), port: *port, debug: *debug, cur: cur.Normalize()}
+	if *res != "" {
+		if _, err := fmt.Sscanf(strings.ToLower(*res), "%dx%d", &a.resW, &a.resH); err != nil || a.resW <= 0 || a.resH <= 0 {
+			logger.Fatalf("invalid -res %q, expected e.g. 1920x1080", *res)
+		}
 	}
-	win.SetStatus(waiting)
+	a.win.SetHooks(ui.SettingsHooks{Get: a.settings, Apply: a.apply, LogsDir: dir})
+	a.win.SetAlwaysOnTop(a.cur.AlwaysOnTop)
+	a.win.SetStatus(a.waitingText())
 
 	go func() {
-		if *res == "" {
-			*res = "3840x2160"
-			if *h264Only {
-				*res = "1920x1080"
-			}
+		var err error
+		if a.key, a.hw, err = loadIdentity(dir); err != nil {
+			a.fail(fmt.Errorf("identity: %w", err))
+			return
 		}
-		if err := start(*name, *res, *fps, *port, !*h264Only, *debug, dir, logger, win, waiting); err != nil {
-			logger.Printf("fatal: %v", err)
-			win.SetStatus("Error: " + err.Error() + "\n\nSee log: " + filepath.Join(dir, "log.txt"))
+		ffmpeg, err := video.FindFFmpeg()
+		if err != nil {
+			a.fail(err)
+			return
+		}
+		logger.Printf("using ffmpeg at %s", ffmpeg)
+		a.restartMu.Lock()
+		a.dec = video.NewDecoder(ffmpeg, a.win.SetFrame, logger)
+		err = a.startLocked()
+		a.restartMu.Unlock()
+		if err != nil {
+			a.fail(err)
 		}
 	}()
 
-	if err := win.Run(); err != nil {
+	if err := a.win.Run(); err != nil {
 		logger.Printf("window: %v", err)
 	}
-	cleanupMu.Lock()
-	if cleanup != nil {
-		cleanup()
+	a.restartMu.Lock()
+	if a.dec != nil {
+		a.stopLocked()
 	}
-	cleanupMu.Unlock()
-}
-
-func start(name, res string, fps, port int, hevc, debug bool, dir string, logger *log.Logger, win *ui.Window, waiting string) error {
-	var width, height int
-	if _, err := fmt.Sscanf(strings.ToLower(res), "%dx%d", &width, &height); err != nil || width <= 0 || height <= 0 {
-		return fmt.Errorf("invalid -res %q, expected e.g. 1920x1080", res)
-	}
-	key, hw, err := loadIdentity(dir)
-	if err != nil {
-		return fmt.Errorf("identity: %w", err)
-	}
-	ffmpeg, err := video.FindFFmpeg()
-	if err != nil {
-		return err
-	}
-	logger.Printf("using ffmpeg at %s", ffmpeg)
-
-	g := &glue{win: win, log: logger, waiting: waiting}
-	g.dec = video.NewDecoder(ffmpeg, win.SetFrame, logger)
-
-	srv := airplay.NewServer(airplay.Config{
-		Name: name, HWAddr: hw, Identity: key, HEVC: hevc,
-		Width: width, Height: height, FPS: fps, Port: port, Log: logger,
-	}, g)
-
-	if err := srv.Listen(); err != nil {
-		return fmt.Errorf("cannot listen on port %d (is another AirPlay receiver running?): %w", port, err)
-	}
-	responder, err := mdns.Start("iPhoneMirror-"+hex.EncodeToString(hw[3:]), []mdns.Service{
-		{Instance: name, Type: "_airplay._tcp", Port: port, TXT: srv.AirPlayTXT()},
-		{Instance: srv.RAOPInstanceName(), Type: "_raop._tcp", Port: port, TXT: srv.RAOPTXT()},
-	}, logger, debug)
-	if err != nil {
-		return fmt.Errorf("mDNS: %w", err)
-	}
-	cleanupMu.Lock()
-	cleanup = func() { responder.Close(); srv.Close(); g.dec.Stop() }
-	cleanupMu.Unlock()
-	logger.Printf("AirPlay receiver %q ready on port %d (device id %s, requesting %dx%d@%d, hevc=%v)",
-		name, port, srv.DeviceID(), width, height, fps, hevc)
-	if err := srv.Serve(); err != nil {
-		return fmt.Errorf("AirPlay server: %w", err)
-	}
-	return nil
+	a.restartMu.Unlock()
 }

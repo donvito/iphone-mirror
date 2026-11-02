@@ -141,7 +141,16 @@ type Window struct {
 	fw, fh  int
 	status  string
 	pending string
+
+	hooks              SettingsHooks
+	dlg                windows.HWND
+	dlgFont            uintptr
+	dlgClassRegistered bool
+	startOnTop         bool
 }
+
+// SetHooks enables the right-click menu and settings dialog. Call before Run.
+func (w *Window) SetHooks(h SettingsHooks) { w.hooks = h }
 
 func New(title string) *Window {
 	return &Window{title: title}
@@ -223,6 +232,9 @@ func (w *Window) Run() error {
 		return err
 	}
 	w.hwnd = windows.HWND(hwnd)
+	if w.startOnTop {
+		w.SetAlwaysOnTop(true)
+	}
 	w.fitTo(1290, 2796) // iPhone 15 Pro Max portrait aspect ratio
 	pShowWindow.Call(hwnd, 5)
 
@@ -231,6 +243,11 @@ func (w *Window) Run() error {
 		r, _, _ := pGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
 		if int32(r) <= 0 {
 			return nil
+		}
+		if w.dlg != 0 {
+			if r, _, _ := pIsDialogMessageW.Call(uintptr(w.dlg), uintptr(unsafe.Pointer(&m))); r != 0 {
+				continue // Tab / Enter / Esc handling for the settings dialog
+			}
 		}
 		pTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		pDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
@@ -291,6 +308,9 @@ func (w *Window) fitToVideo() {
 	w.mu.Lock()
 	fw, fh := w.fw, w.fh
 	w.mu.Unlock()
+	if fw == 0 || fh == 0 {
+		fw, fh = 1290, 2796 // no video yet: iPhone 15 Pro Max portrait
+	}
 	w.fitTo(fw, fh)
 }
 
@@ -303,6 +323,14 @@ func (w *Window) wndProc(hwnd windows.HWND, message uint32, wParam, lParam uintp
 		return 0
 	case wmLButtonDblClk:
 		w.fitToVideo()
+		return 0
+	case wmCommand:
+		if wParam&0xffff == menuSettings {
+			w.openSettings()
+			return 0
+		}
+	case wmContextMenu:
+		w.showContextMenu(int32(int16(lParam&0xffff)), int32(int16(lParam>>16)))
 		return 0
 	case wmSetTitle:
 		w.mu.Lock()

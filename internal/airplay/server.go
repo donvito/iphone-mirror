@@ -56,6 +56,8 @@ type Server struct {
 
 	mu           sync.Mutex
 	activeMirror *mirrorStream
+	conns        map[net.Conn]struct{}
+	wg           sync.WaitGroup
 }
 
 func NewServer(cfg Config, sink Sink) *Server {
@@ -148,15 +150,37 @@ func (s *Server) Serve() error {
 			}
 			return err
 		}
-		go s.serveConn(c)
+		s.mu.Lock()
+		if s.conns == nil {
+			s.conns = map[net.Conn]struct{}{}
+		}
+		s.conns[c] = struct{}{}
+		s.mu.Unlock()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.serveConn(c)
+			s.mu.Lock()
+			delete(s.conns, c)
+			s.mu.Unlock()
+		}()
 	}
 }
 
+// Close stops listening, disconnects all clients and waits until their
+// sessions (including mirror streams) have shut down.
 func (s *Server) Close() error {
+	var err error
 	if s.ln != nil {
-		return s.ln.Close()
+		err = s.ln.Close()
 	}
-	return nil
+	s.mu.Lock()
+	for c := range s.conns {
+		c.Close()
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+	return err
 }
 
 // conn is the state of one RTSP control connection from an AirPlay client.
