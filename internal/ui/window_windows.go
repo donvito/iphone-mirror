@@ -1,8 +1,10 @@
-// Package ui shows the mirrored iPhone screen in a plain Win32 window that can
-// be captured by OBS ("Window Capture").
 package ui
 
+// On Windows the mirrored iPhone screen is shown in a plain Win32 window that
+// can be captured by OBS ("Window Capture").
+
 import (
+	"log"
 	"runtime"
 	"sync"
 	"syscall"
@@ -152,7 +154,8 @@ type Window struct {
 // SetHooks enables the right-click menu and settings dialog. Call before Run.
 func (w *Window) SetHooks(h SettingsHooks) { w.hooks = h }
 
-func New(title string) *Window {
+// New creates the window (shown by Run). The logger is used by the macOS version only.
+func New(title string, _ *log.Logger) *Window {
 	return &Window{title: title}
 }
 

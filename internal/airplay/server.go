@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/melvi/iphone-win-obs/internal/fairplay"
+	"github.com/donvito/iphone-mirror/internal/fairplay"
 	"howett.net/plist"
 )
 
@@ -45,7 +45,7 @@ type Config struct {
 	Width    int
 	Height   int
 	FPS      int
-	Port     int
+	Port     int // 0 = any free port (see Server.Port after Listen)
 	Log      *log.Logger
 }
 
@@ -61,9 +61,6 @@ type Server struct {
 }
 
 func NewServer(cfg Config, sink Sink) *Server {
-	if cfg.Port == 0 {
-		cfg.Port = 7000
-	}
 	if cfg.Log == nil {
 		cfg.Log = log.Default()
 	}
@@ -138,6 +135,7 @@ func (s *Server) Listen() error {
 		return err
 	}
 	s.ln = ln
+	s.cfg.Port = ln.Addr().(*net.TCPAddr).Port // resolves port 0 to the one picked by the OS
 	return nil
 }
 
@@ -188,6 +186,7 @@ type conn struct {
 	s      *Server
 	nc     net.Conn
 	remote net.IP
+	zone   string // IPv6 zone of remote (iPhones often connect over link-local IPv6 on macOS)
 	fp     fairplay.Session
 	pair   pairing
 
@@ -201,7 +200,7 @@ type conn struct {
 func (s *Server) serveConn(nc net.Conn) {
 	c := &conn{s: s, nc: nc, pair: pairing{identity: s.cfg.Identity}}
 	if ta, ok := nc.RemoteAddr().(*net.TCPAddr); ok {
-		c.remote = ta.IP
+		c.remote, c.zone = ta.IP, ta.Zone
 	}
 	defer c.close()
 	br := bufio.NewReader(nc)
@@ -460,7 +459,7 @@ func (c *conn) handleSetup(req *request, res *response) error {
 		if c.ntp != nil {
 			c.ntp.stop()
 		}
-		c.ntp, err = startNTP(c.remote, int(toUint(body["timingPort"])), c.s.cfg.Log)
+		c.ntp, err = startNTP(c.remote, c.zone, int(toUint(body["timingPort"])), c.s.cfg.Log)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
-// Package video decodes the mirrored H.264/H.265 stream into BGRA frames using
-// an ffmpeg child process.
 package video
+
+// Windows decodes the mirrored H.264/H.265 stream into BGRA frames using an
+// ffmpeg child process. (macOS uses VideoToolbox, see internal/ui.)
 
 import (
 	"bufio"
@@ -15,12 +16,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-)
-
-// Codec names double as ffmpeg input format names.
-const (
-	H264 = "h264"
-	HEVC = "hevc"
 )
 
 // FrameSink receives decoded frames. It returns a buffer that the decoder may
@@ -68,7 +63,7 @@ func NewDecoder(ffmpegPath string, sink FrameSink, logger *log.Logger) *Decoder 
 // for HEVC). It (re)starts ffmpeg when the codec or frame size changes (e.g.
 // the phone is rotated) and feeds the parameter sets to the decoder.
 func (d *Decoder) Configure(codec string, paramSets [][]byte) error {
-	w, h, err := frameSize(codec, paramSets)
+	w, h, err := FrameSize(codec, paramSets)
 	if err != nil {
 		return err
 	}
@@ -86,18 +81,6 @@ func (d *Decoder) Configure(codec string, paramSets [][]byte) error {
 		buf = append(append(buf, 0, 0, 0, 1), ps...)
 	}
 	return d.writeLocked(buf)
-}
-
-func frameSize(codec string, paramSets [][]byte) (int, int, error) {
-	for _, ps := range paramSets {
-		switch {
-		case codec == H264 && len(ps) > 0 && ps[0]&0x1f == 7:
-			return ParseSPSSize(ps)
-		case codec == HEVC && len(ps) > 0 && (ps[0]>>1)&0x3f == 33:
-			return ParseHEVCSPSSize(ps)
-		}
-	}
-	return 0, 0, fmt.Errorf("no %s SPS in codec configuration", codec)
 }
 
 // Write feeds one Annex-B access unit to the decoder.

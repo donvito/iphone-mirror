@@ -27,14 +27,14 @@ type ntpClient struct {
 	quit   chan struct{}
 }
 
-func startNTP(remoteIP net.IP, remotePort int, logger *log.Logger) (*ntpClient, error) {
+func startNTP(remoteIP net.IP, zone string, remotePort int, logger *log.Logger) (*ntpClient, error) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{})
 	if err != nil {
 		return nil, err
 	}
 	n := &ntpClient{conn: conn, log: logger, quit: make(chan struct{})}
 	if remotePort > 0 {
-		n.remote = &net.UDPAddr{IP: remoteIP, Port: remotePort}
+		n.remote = &net.UDPAddr{IP: remoteIP, Port: remotePort, Zone: zone}
 		go n.sendLoop()
 	}
 	go n.recvLoop()

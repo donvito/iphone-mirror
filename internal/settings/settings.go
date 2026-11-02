@@ -1,4 +1,6 @@
-// Package settings stores the user's preferences in %APPDATA%\iPhoneMirror\settings.json.
+// Package settings stores the user's preferences in settings.json inside the
+// app's config folder (%APPDATA%\iPhoneMirror on Windows,
+// ~/Library/Application Support/iPhoneMirror on macOS).
 package settings
 
 import (
@@ -18,11 +20,7 @@ type Settings struct {
 
 // Defaults returns the settings used before the user changes anything.
 func Defaults() Settings {
-	host, _ := os.Hostname()
-	if host == "" {
-		host = "iPhone Mirror"
-	}
-	return Settings{Name: host, HEVC: true, FPS: 60, ShowStatus: true}
+	return Settings{Name: defaultName(), HEVC: true, FPS: 60, ShowStatus: true}
 }
 
 // Resolution is what the receiver advertises; the phone fits its screen to the height.

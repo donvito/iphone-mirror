@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/melvi/iphone-win-obs/internal/sender"
+	"github.com/donvito/iphone-mirror/internal/sender"
 )
 
 // TestDecoderLatency feeds a 60fps stream in real time and checks that decoded

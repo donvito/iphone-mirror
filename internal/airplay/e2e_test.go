@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/melvi/iphone-win-obs/internal/airplay"
-	"github.com/melvi/iphone-win-obs/internal/sender"
+	"github.com/donvito/iphone-mirror/internal/airplay"
+	"github.com/donvito/iphone-mirror/internal/sender"
 )
 
 type recSink struct {

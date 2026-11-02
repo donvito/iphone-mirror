@@ -5,7 +5,6 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/melvi/iphone-win-obs/internal/settings"
 	"golang.org/x/sys/windows"
 )
 
@@ -75,13 +74,6 @@ var qualityChoices = []string{
 }
 
 var fpsChoices = []int{60, 30}
-
-// SettingsHooks connect the window to the rest of the app.
-type SettingsHooks struct {
-	Get     func() settings.Settings
-	Apply   func(settings.Settings) // called on the UI thread; must not block
-	LogsDir string
-}
 
 func (w *Window) showContextMenu(x, y int32) {
 	if w.hooks.Get == nil {

@@ -1,8 +1,8 @@
-// iPhone Mirror: an AirPlay screen mirroring receiver for Windows.
+// iPhone Mirror: an AirPlay screen mirroring receiver for Windows and macOS.
 //
 // Run it, then on the iPhone open Control Center -> Screen Mirroring and pick
-// this PC. The phone screen appears in a normal window that OBS can capture
-// with a "Window Capture" source.
+// this computer. The phone screen appears in a normal window that OBS can
+// capture. OS-specific parts live in platform_windows.go / platform_darwin.go.
 package main
 
 import (
@@ -20,14 +20,20 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/melvi/iphone-win-obs/internal/airplay"
-	"github.com/melvi/iphone-win-obs/internal/mdns"
-	"github.com/melvi/iphone-win-obs/internal/settings"
-	"github.com/melvi/iphone-win-obs/internal/ui"
-	"github.com/melvi/iphone-win-obs/internal/video"
+	"github.com/donvito/iphone-mirror/internal/airplay"
+	"github.com/donvito/iphone-mirror/internal/mdns"
+	"github.com/donvito/iphone-mirror/internal/settings"
+	"github.com/donvito/iphone-mirror/internal/ui"
 )
 
 const windowTitle = "iPhone Mirror"
+
+// videoOutput decodes the mirrored stream and shows it in the window.
+type videoOutput interface {
+	Configure(codec string, paramSets [][]byte) error // new stream or rotation; raw NAL units
+	Write(annexB []byte)                              // one access unit; not retained
+	Stop()                                            // end the stream and clear the picture
+}
 
 type identity struct {
 	Seed   string `json:"seed"`
@@ -35,7 +41,7 @@ type identity struct {
 }
 
 func appDir() string {
-	base, err := os.UserConfigDir()
+	base, err := os.UserConfigDir() // %APPDATA% or ~/Library/Application Support
 	if err != nil {
 		base = "."
 	}
@@ -72,16 +78,17 @@ func loadIdentity(dir string) (ed25519.PrivateKey, net.HardwareAddr, error) {
 
 // app ties the AirPlay receiver, decoder, window and settings together.
 type app struct {
-	dir   string
-	log   *log.Logger
-	win   *ui.Window
-	dec   *video.Decoder
-	key   ed25519.PrivateKey
-	hw    net.HardwareAddr
-	port  int
-	debug bool
-	resW  int // -res override (0 = derive from settings)
-	resH  int
+	dir       string
+	log       *log.Logger
+	win       *ui.Window
+	video     videoOutput // set once at startup, before the receiver starts
+	key       ed25519.PrivateKey
+	hw        net.HardwareAddr
+	port      int
+	portFixed bool // -port was given: don't fall back to a free port
+	debug     bool
+	resW      int // -res override (0 = derive from settings)
+	resH      int
 
 	mu  sync.Mutex
 	cur settings.Settings
@@ -103,30 +110,29 @@ func (a *app) waitingText() string {
 		return ""
 	}
 	return fmt.Sprintf("Waiting for iPhone…\n\nOn your iPhone, open Control Center, tap Screen Mirroring and choose “%s”.\n\n"+
-		"The iPhone and this PC must be on the same network.\n\nRight-click this window for settings.", s.Name)
+		"The iPhone and this %s must be on the same network.\n\n%s", s.Name, computerNoun, settingsHint)
 }
 
 func (a *app) MirrorStarted(client string) {
 	a.log.Printf("mirroring started from %s", client)
-	a.dec.Stop() // fresh decoder per session, even if the size matches the previous one
+	a.video.Stop() // fresh decoder per session, even if the size matches the previous one
 	if a.settings().ShowStatus {
 		a.win.SetStatus("iPhone connected (" + client + ")\n\nStarting video…")
 	}
 }
 
 func (a *app) CodecConfig(codec string, paramSets [][]byte) {
-	if err := a.dec.Configure(codec, paramSets); err != nil {
+	if err := a.video.Configure(codec, paramSets); err != nil {
 		a.log.Printf("decoder: %v", err)
 	}
 }
 
 func (a *app) VideoData(annexB []byte) {
-	a.dec.Write(annexB)
+	a.video.Write(annexB)
 }
 
 func (a *app) MirrorStopped() {
-	a.dec.Stop()
-	a.win.ClearFrame()
+	a.video.Stop()
 	a.win.SetStatus(a.waitingText())
 }
 
@@ -178,7 +184,9 @@ func (a *app) stopLocked() {
 		a.srv.Close()
 		a.srv = nil
 	}
-	a.dec.Stop()
+	if a.video != nil {
+		a.video.Stop()
+	}
 }
 
 func (a *app) startLocked() error {
@@ -187,16 +195,26 @@ func (a *app) startLocked() error {
 	if a.resW > 0 {
 		w, h = a.resW, a.resH
 	}
-	srv := airplay.NewServer(airplay.Config{
-		Name: s.Name, HWAddr: a.hw, Identity: a.key, HEVC: s.HEVC,
-		Width: w, Height: h, FPS: s.FPS, Port: a.port, Log: a.log,
-	}, a)
+	newServer := func(port int) *airplay.Server {
+		return airplay.NewServer(airplay.Config{
+			Name: s.Name, HWAddr: a.hw, Identity: a.key, HEVC: s.HEVC,
+			Width: w, Height: h, FPS: s.FPS, Port: port, Log: a.log,
+		}, a)
+	}
+	srv := newServer(a.port)
 	if err := srv.Listen(); err != nil {
-		return fmt.Errorf("cannot listen on port %d (is another AirPlay receiver running?): %w", a.port, err)
+		if a.portFixed {
+			return fmt.Errorf("cannot listen on port %d (is another AirPlay receiver running?): %w", a.port, err)
+		}
+		a.log.Printf("port %d is busy (%v), using a free port", a.port, err)
+		srv = newServer(0)
+		if err := srv.Listen(); err != nil {
+			return fmt.Errorf("cannot listen for AirPlay connections: %w", err)
+		}
 	}
 	resp, err := mdns.Start("iPhoneMirror-"+hex.EncodeToString(a.hw[3:]), []mdns.Service{
-		{Instance: s.Name, Type: "_airplay._tcp", Port: a.port, TXT: srv.AirPlayTXT()},
-		{Instance: srv.RAOPInstanceName(), Type: "_raop._tcp", Port: a.port, TXT: srv.RAOPTXT()},
+		{Instance: s.Name, Type: "_airplay._tcp", Port: srv.Port(), TXT: srv.AirPlayTXT()},
+		{Instance: srv.RAOPInstanceName(), Type: "_raop._tcp", Port: srv.Port(), TXT: srv.RAOPTXT()},
 	}, a.log, a.debug)
 	if err != nil {
 		srv.Close()
@@ -208,10 +226,10 @@ func (a *app) startLocked() error {
 			a.fail(fmt.Errorf("AirPlay server: %w", err))
 		}
 	}()
-	a.win.ClearFrame()
+	a.video.Stop()
 	a.win.SetStatus(a.waitingText())
 	a.log.Printf("AirPlay receiver %q ready on port %d (device id %s, requesting %dx%d@%d, hevc=%v)",
-		s.Name, a.port, srv.DeviceID(), w, h, s.FPS, s.HEVC)
+		s.Name, srv.Port(), srv.DeviceID(), w, h, s.FPS, s.HEVC)
 	return nil
 }
 
@@ -220,8 +238,8 @@ func main() {
 	res := flag.String("res", "", "advanced: requested resolution WxH; the height decides the stream size")
 	h264Only := flag.Bool("h264", false, "only accept H.264, up to 1080p (overrides settings)")
 	fps := flag.Int("fps", 0, "maximum frame rate requested from the iPhone, 30 or 60 (overrides settings)")
-	port := flag.Int("port", 7000, "AirPlay TCP port")
-	debug := flag.Bool("debug", false, "log every mDNS packet received (for troubleshooting discovery)")
+	port := flag.Int("port", defaultPort, "AirPlay TCP port (a free port is used if the default is busy)")
+	debug := flag.Bool("debug", false, "Windows: log every mDNS packet received (for troubleshooting discovery)")
 	hideStatus := flag.Bool("hide-status", false, "plain black window while no iPhone is connected (overrides settings)")
 	flag.Parse()
 
@@ -235,6 +253,7 @@ func main() {
 
 	// Command-line flags override the saved settings for this run only.
 	cur := settings.Load(dir)
+	portFixed := false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "name":
@@ -245,15 +264,27 @@ func main() {
 			cur.FPS = *fps
 		case "hide-status":
 			cur.ShowStatus = !*hideStatus
+		case "port":
+			portFixed = true
 		}
 	})
-	a := &app{dir: dir, log: logger, win: ui.New(windowTitle), port: *port, debug: *debug, cur: cur.Normalize()}
+	a := &app{dir: dir, log: logger, win: ui.New(windowTitle, logger), port: *port, portFixed: portFixed,
+		debug: *debug, cur: cur.Normalize()}
 	if *res != "" {
 		if _, err := fmt.Sscanf(strings.ToLower(*res), "%dx%d", &a.resW, &a.resH); err != nil || a.resW <= 0 || a.resH <= 0 {
 			logger.Fatalf("invalid -res %q, expected e.g. 1920x1080", *res)
 		}
 	}
-	a.win.SetHooks(ui.SettingsHooks{Get: a.settings, Apply: a.apply, LogsDir: dir})
+	var quitOnce sync.Once
+	quit := func() {
+		quitOnce.Do(func() {
+			a.restartMu.Lock()
+			a.stopLocked()
+			a.restartMu.Unlock()
+			logger.Printf("exiting")
+		})
+	}
+	a.win.SetHooks(ui.SettingsHooks{Get: a.settings, Apply: a.apply, LogsDir: dir, OnQuit: quit})
 	a.win.SetAlwaysOnTop(a.cur.AlwaysOnTop)
 	a.win.SetStatus(a.waitingText())
 
@@ -263,14 +294,13 @@ func main() {
 			a.fail(fmt.Errorf("identity: %w", err))
 			return
 		}
-		ffmpeg, err := video.FindFFmpeg()
+		v, err := newVideo(a.win, logger)
 		if err != nil {
 			a.fail(err)
 			return
 		}
-		logger.Printf("using ffmpeg at %s", ffmpeg)
 		a.restartMu.Lock()
-		a.dec = video.NewDecoder(ffmpeg, a.win.SetFrame, logger)
+		a.video = v
 		err = a.startLocked()
 		a.restartMu.Unlock()
 		if err != nil {
@@ -278,12 +308,8 @@ func main() {
 		}
 	}()
 
-	if err := a.win.Run(); err != nil {
+	if err := a.win.Run(); err != nil { // on macOS Run never returns; quit runs via OnQuit
 		logger.Printf("window: %v", err)
 	}
-	a.restartMu.Lock()
-	if a.dec != nil {
-		a.stopLocked()
-	}
-	a.restartMu.Unlock()
+	quit()
 }

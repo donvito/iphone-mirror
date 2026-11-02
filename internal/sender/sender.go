@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/melvi/iphone-win-obs/internal/fairplay"
+	"github.com/donvito/iphone-mirror/internal/fairplay"
 	"howett.net/plist"
 )
 

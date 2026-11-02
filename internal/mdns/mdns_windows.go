@@ -1,7 +1,8 @@
-// Package mdns is a small multicast DNS / DNS-SD responder, enough to make the
-// receiver show up in the iPhone's Screen Mirroring list without needing
-// Apple's Bonjour service to be installed on Windows.
 package mdns
+
+// On Windows this is a small multicast DNS / DNS-SD responder, enough to make
+// the receiver show up in the iPhone's Screen Mirroring list without needing
+// Apple's Bonjour service to be installed.
 
 import (
 	"fmt"
@@ -21,13 +22,6 @@ const (
 )
 
 var groupAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
-
-type Service struct {
-	Instance string // e.g. "My PC"
-	Type     string // e.g. "_airplay._tcp"
-	Port     int
-	TXT      []string
-}
 
 func (s Service) typeName() string     { return s.Type + ".local." }
 func (s Service) instanceName() string { return escapeLabel(s.Instance) + "." + s.typeName() }

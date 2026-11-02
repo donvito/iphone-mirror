@@ -1,18 +1,19 @@
 // fakesender streams a test pattern to a running iPhone Mirror receiver using
 // the AirPlay mirroring protocol, so the app can be tested without an iPhone.
 //
-//	go run ./cmd/fakesender -addr 127.0.0.1:7000 -size 886x1920 -seconds 20 -rotate
+//	go run ./cmd/fakesender -size 886x1920 -seconds 20 -rotate
 package main
 
 import (
 	"flag"
 	"log"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/melvi/iphone-win-obs/internal/sender"
+	"github.com/donvito/iphone-mirror/internal/sender"
 )
 
 type segment struct {
@@ -39,7 +40,7 @@ func encode(codec, size string, fps, seconds int) segment {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:7000", "receiver address")
+	addr := flag.String("addr", defaultAddr(), "receiver address")
 	size := flag.String("size", "886x1920", "video size")
 	seconds := flag.Int("seconds", 15, "duration")
 	fps := flag.Int("fps", 30, "frame rate")
@@ -91,4 +92,13 @@ func main() {
 	}
 	c.Teardown()
 	log.Printf("done")
+}
+
+// defaultAddr matches the receiver's default port (7100 on macOS, where the
+// system AirPlay Receiver owns 7000).
+func defaultAddr() string {
+	if runtime.GOOS == "darwin" {
+		return "127.0.0.1:7100"
+	}
+	return "127.0.0.1:7000"
 }
