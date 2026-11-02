@@ -22,15 +22,18 @@ const (
 	model         = "AppleTV3,2"
 	sourceVersion = "220.68"
 	featuresLow   = 0x5A7FFEE6 // includes screen mirroring + legacy pairing (bit 27)
-	featuresHigh  = 0x0
-	pi            = "2e388006-13ba-4041-9a67-25dd4a43d536"
+	featureHEVC   = 1 << 10    // bit 42 (SupportsScreenMultiCodec): lets the client send H.265
+
+	CodecH264 = "h264"
+	CodecHEVC = "hevc"
+	pi        = "2e388006-13ba-4041-9a67-25dd4a43d536"
 )
 
-// Sink receives the decoded-from-network (but still compressed) video stream.
+// Sink receives the decrypted (but still compressed) video stream.
 type Sink interface {
 	MirrorStarted(client string)
-	CodecConfig(sps, pps []byte) // raw H.264 NAL units, without start codes
-	VideoData(annexB []byte)     // one access unit in Annex-B format
+	CodecConfig(codec string, paramSets [][]byte) // CodecH264/CodecHEVC; raw NAL units without start codes
+	VideoData(annexB []byte)                      // one access unit in Annex-B format; not retained
 	MirrorStopped()
 }
 
@@ -38,6 +41,7 @@ type Config struct {
 	Name     string
 	HWAddr   net.HardwareAddr // 6 bytes, used as the AirPlay device ID
 	Identity ed25519.PrivateKey
+	HEVC     bool // advertise H.265 support (needed for streams taller than 1080)
 	Width    int
 	Height   int
 	FPS      int
@@ -74,8 +78,15 @@ func (s *Server) publicKey() []byte {
 	return s.cfg.Identity.Public().(ed25519.PublicKey)
 }
 
+func (s *Server) featuresHigh() uint64 {
+	if s.cfg.HEVC {
+		return featureHEVC
+	}
+	return 0
+}
+
 func (s *Server) features() string {
-	return fmt.Sprintf("0x%X,0x%X", featuresLow, featuresHigh)
+	return fmt.Sprintf("0x%X,0x%X", featuresLow, s.featuresHigh())
 }
 
 // AirPlayTXT returns the TXT record entries for the _airplay._tcp service.
@@ -290,7 +301,7 @@ func (c *conn) handleInfo(req *request, res *response) error {
 	out["deviceID"] = s.DeviceID()
 	out["macAddress"] = s.DeviceID()
 	out["pk"] = s.publicKey()
-	out["features"] = uint64(featuresHigh)<<32 | featuresLow
+	out["features"] = s.featuresHigh()<<32 | featuresLow
 	out["name"] = s.cfg.Name
 	out["pi"] = pi
 	out["vv"] = uint64(2)

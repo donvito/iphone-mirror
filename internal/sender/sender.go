@@ -250,6 +250,23 @@ func (m *Mirror) SendCodec(sps, pps []byte) error {
 	return m.send(1, b)
 }
 
+// SendCodecHEVC sends VPS/SPS/PPS the way an iPhone does: an 'hvc1' sample
+// entry box containing an 'hvcC' (HEVCDecoderConfigurationRecord) box.
+func (m *Mirror) SendCodecHEVC(vps, sps, pps []byte) error {
+	rec := make([]byte, 22)
+	rec[0] = 1 // configurationVersion
+	rec = append(rec, 3)
+	for i, n := range [][]byte{vps, sps, pps} {
+		rec = append(rec, 0x80|byte(32+i), 0, 1, byte(len(n)>>8), byte(len(n)))
+		rec = append(rec, n...)
+	}
+	hvcC := binary.BigEndian.AppendUint32(nil, uint32(8+len(rec)))
+	hvcC = append(append(hvcC, "hvcC"...), rec...)
+	entry := binary.BigEndian.AppendUint32(nil, uint32(8+78+len(hvcC)))
+	entry = append(append(append(entry, "hvc1"...), make([]byte, 78)...), hvcC...)
+	return m.send(1, entry)
+}
+
 // SendFrame sends NAL units as an encrypted, length-prefixed type 0 packet.
 func (m *Mirror) SendFrame(nals [][]byte) error {
 	var b []byte
@@ -261,7 +278,7 @@ func (m *Mirror) SendFrame(nals [][]byte) error {
 	return m.send(0, b)
 }
 
-// SplitAnnexB splits an H.264 elementary stream into NAL units.
+// SplitAnnexB splits an H.264/H.265 elementary stream into NAL units.
 func SplitAnnexB(b []byte) [][]byte {
 	var nals [][]byte
 	start := -1
@@ -296,6 +313,30 @@ func AccessUnits(nals [][]byte) (sps, pps []byte, frames [][][]byte) {
 			pps = n
 		case 9: // access unit delimiter
 		case 1, 5:
+			cur = append(cur, n)
+			frames = append(frames, cur)
+			cur = nil
+		default:
+			cur = append(cur, n)
+		}
+	}
+	return
+}
+
+// HEVCAccessUnits is AccessUnits for H.265: parameter sets are returned
+// separately and each frame ends with a VCL NAL unit.
+func HEVCAccessUnits(nals [][]byte) (vps, sps, pps []byte, frames [][][]byte) {
+	var cur [][]byte
+	for _, n := range nals {
+		switch t := (n[0] >> 1) & 0x3f; {
+		case t == 32:
+			vps = n
+		case t == 33:
+			sps = n
+		case t == 34:
+			pps = n
+		case t == 35: // access unit delimiter
+		case t < 32:
 			cur = append(cur, n)
 			frames = append(frames, cur)
 			cur = nil

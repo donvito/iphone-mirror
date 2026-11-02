@@ -30,20 +30,22 @@ On the iPhone: **Control Center → Screen Mirroring → pick your PC's name**.
 
 1. Add a **Window Capture** source and pick `[iPhoneMirror.exe]: iPhone Mirror`.
 2. Set *Capture Method* to **Windows 10 (1903 and up)**. This also works when the window is behind other windows (but not when it's minimized).
-3. Double‑click the mirror window to resize it to the phone's aspect ratio and remove the black bars.
-   You can also leave it as is and crop in OBS.
+3. The window opens as tall as your screen allows. Double‑click it to match the phone's aspect ratio
+   exactly (no black bars). OBS captures the window at its on‑screen size, so keep it large for sharp text.
 
 The window title stays `iPhone Mirror`, so OBS finds it again after a restart.
 
 ## Options
 
 ```
-iPhoneMirror.exe [-name "My PC"] [-res 1920x1080] [-fps 60] [-hide-status] [-port 7000]
+iPhoneMirror.exe [-name "My PC"] [-res 3840x2160] [-fps 60] [-h264] [-hide-status] [-port 7000]
 ```
 
 - `-name`: the name shown on the iPhone (defaults to the computer name).
-- `-res`: the resolution requested from the phone. The **height** decides the stream size: with
-  1080, a portrait iPhone sends about 498×1080, which fills a 1080p OBS canvas.
+- `-res`: the resolution requested from the phone. The **height** decides the stream size. The default
+  4K request makes an iPhone 15 Pro Max send HEVC at about 998×2160 in portrait (~50 fps).
+- `-h264`: only accept H.264. This caps the stream at 1080 pixels high (about 498×1080 in portrait) but
+  uses less CPU.
 - `-hide-status`: shows a plain black window instead of the instructions while no phone is connected.
 
 Logs are written to `%APPDATA%\iPhoneMirror\log.txt`.
@@ -52,7 +54,6 @@ Logs are written to `%APPDATA%\iPhoneMirror\log.txt`.
 
 - Video only: the iPhone's audio is received but thrown away. While you're mirroring, the phone sends
   its sound to the receiver, so you won't hear it on the phone either.
-- H.264 only, up to 1080p‑class streams (no 4K/HEVC).
 - One phone at a time. A new phone takes over from the current one.
 
 ## Testing without an iPhone
@@ -62,6 +63,7 @@ test pattern:
 
 ```powershell
 go run ./cmd/fakesender -addr 127.0.0.1:7000 -size 886x1920 -seconds 15 -rotate
+go run ./cmd/fakesender -codec hevc -size 998x2160 -seconds 10
 go test ./...
 ```
 

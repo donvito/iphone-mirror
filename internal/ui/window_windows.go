@@ -35,6 +35,8 @@ var (
 	pSetWindowTextW                = user32.NewProc("SetWindowTextW")
 	pSetWindowPos                  = user32.NewProc("SetWindowPos")
 	pAdjustWindowRectExForDpi      = user32.NewProc("AdjustWindowRectExForDpi")
+	pMonitorFromWindow             = user32.NewProc("MonitorFromWindow")
+	pGetMonitorInfoW               = user32.NewProc("GetMonitorInfoW")
 	pGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
 	pSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	pStretchDIBits                 = gdi32.NewProc("StretchDIBits")
@@ -74,7 +76,6 @@ const (
 	dtWordBreak        = 0x0010
 	dtCalcRect         = 0x0400
 	dtNoPrefix         = 0x0800
-	swpNoMove          = 0x0002
 	swpNoZOrder        = 0x0004
 )
 
@@ -222,7 +223,7 @@ func (w *Window) Run() error {
 		return err
 	}
 	w.hwnd = windows.HWND(hwnd)
-	w.resizeClient(540, 960)
+	w.fitTo(1290, 2796) // iPhone 15 Pro Max portrait aspect ratio
 	pShowWindow.Call(hwnd, 5)
 
 	var m msg
@@ -244,30 +245,53 @@ func (w *Window) dpi() int32 {
 	return int32(d)
 }
 
-// resizeClient resizes the window so its client area is (cw x ch) logical pixels.
-func (w *Window) resizeClient(cw, ch int32) {
-	dpi := w.dpi()
-	r := rect{0, 0, cw * dpi / 96, ch * dpi / 96}
-	pAdjustWindowRectExForDpi.Call(uintptr(unsafe.Pointer(&r)), wsOverlappedWindow, 0, 0, uintptr(dpi))
-	pSetWindowPos.Call(uintptr(w.hwnd), 0, 0, 0, uintptr(r.right-r.left), uintptr(r.bottom-r.top), swpNoMove|swpNoZOrder)
+type monitorInfo struct {
+	size    uint32
+	monitor rect
+	work    rect
+	flags   uint32
 }
 
-// fitToVideo resizes the window to the video's aspect ratio, keeping its current height.
+// fitTo makes the window as tall as the monitor's work area allows, with a
+// client area of the given aspect ratio. A tall window matters for OBS: Window
+// Capture records the window at its on-screen size.
+func (w *Window) fitTo(aspectW, aspectH int) {
+	if aspectW <= 0 || aspectH <= 0 {
+		return
+	}
+	mon, _, _ := pMonitorFromWindow.Call(uintptr(w.hwnd), 2) // MONITOR_DEFAULTTONEAREST
+	mi := monitorInfo{}
+	mi.size = uint32(unsafe.Sizeof(mi))
+	if r, _, _ := pGetMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi))); r == 0 {
+		return
+	}
+	dpi := w.dpi()
+	var frame rect // non-client border sizes
+	pAdjustWindowRectExForDpi.Call(uintptr(unsafe.Pointer(&frame)), wsOverlappedWindow, 0, 0, uintptr(dpi))
+	frameW, frameH := frame.right-frame.left, frame.bottom-frame.top
+	workW, workH := mi.work.right-mi.work.left, mi.work.bottom-mi.work.top
+
+	ch := workH - frameH
+	cw := int32(int64(ch) * int64(aspectW) / int64(aspectH))
+	if cw > workW-frameW {
+		cw = workW - frameW
+		ch = int32(int64(cw) * int64(aspectH) / int64(aspectW))
+	}
+	var wr rect
+	pGetWindowRect.Call(uintptr(w.hwnd), uintptr(unsafe.Pointer(&wr)))
+	x := wr.left
+	if x < mi.work.left || x+cw+frameW > mi.work.right {
+		x = mi.work.left + (workW-cw-frameW)/2
+	}
+	pSetWindowPos.Call(uintptr(w.hwnd), 0, uintptr(x), uintptr(mi.work.top), uintptr(cw+frameW), uintptr(ch+frameH), swpNoZOrder)
+}
+
+// fitToVideo resizes the window to the video's aspect ratio (no black bars).
 func (w *Window) fitToVideo() {
 	w.mu.Lock()
 	fw, fh := w.fw, w.fh
 	w.mu.Unlock()
-	if fw == 0 || fh == 0 {
-		return
-	}
-	var cr rect
-	pGetClientRect.Call(uintptr(w.hwnd), uintptr(unsafe.Pointer(&cr)))
-	dpi := w.dpi()
-	ch := (cr.bottom - cr.top) * 96 / dpi
-	if ch <= 0 {
-		return
-	}
-	w.resizeClient(int32(int64(ch)*int64(fw)/int64(fh)), ch)
+	w.fitTo(fw, fh)
 }
 
 func (w *Window) wndProc(hwnd windows.HWND, message uint32, wParam, lParam uintptr) uintptr {

@@ -84,13 +84,14 @@ type glue struct {
 
 func (g *glue) MirrorStarted(client string) {
 	g.log.Printf("mirroring started from %s", client)
+	g.dec.Stop() // fresh decoder per session, even if the size matches the previous one
 	if g.waiting != "" {
 		g.win.SetStatus("iPhone connected (" + client + ")\n\nStarting video…")
 	}
 }
 
-func (g *glue) CodecConfig(sps, pps []byte) {
-	if err := g.dec.Configure(sps, pps); err != nil {
+func (g *glue) CodecConfig(codec string, paramSets [][]byte) {
+	if err := g.dec.Configure(codec, paramSets); err != nil {
 		g.log.Printf("decoder: %v", err)
 	}
 }
@@ -108,7 +109,8 @@ func (g *glue) MirrorStopped() {
 func main() {
 	host, _ := os.Hostname()
 	name := flag.String("name", host, "name shown in the iPhone's Screen Mirroring list")
-	res := flag.String("res", "1920x1080", "requested resolution WxH (the height decides the stream size)")
+	res := flag.String("res", "", "requested resolution WxH; the height decides the stream size (default 3840x2160, or 1920x1080 with -h264)")
+	h264Only := flag.Bool("h264", false, "only accept H.264 (limits the stream to 1080 pixels high)")
 	fps := flag.Int("fps", 60, "maximum frame rate requested from the iPhone")
 	port := flag.Int("port", 7000, "AirPlay TCP port")
 	debug := flag.Bool("debug", false, "log every mDNS packet received (for troubleshooting discovery)")
@@ -132,7 +134,13 @@ func main() {
 	win.SetStatus(waiting)
 
 	go func() {
-		if err := start(*name, *res, *fps, *port, *debug, dir, logger, win, waiting); err != nil {
+		if *res == "" {
+			*res = "3840x2160"
+			if *h264Only {
+				*res = "1920x1080"
+			}
+		}
+		if err := start(*name, *res, *fps, *port, !*h264Only, *debug, dir, logger, win, waiting); err != nil {
 			logger.Printf("fatal: %v", err)
 			win.SetStatus("Error: " + err.Error() + "\n\nSee log: " + filepath.Join(dir, "log.txt"))
 		}
@@ -148,7 +156,7 @@ func main() {
 	cleanupMu.Unlock()
 }
 
-func start(name, res string, fps, port int, debug bool, dir string, logger *log.Logger, win *ui.Window, waiting string) error {
+func start(name, res string, fps, port int, hevc, debug bool, dir string, logger *log.Logger, win *ui.Window, waiting string) error {
 	var width, height int
 	if _, err := fmt.Sscanf(strings.ToLower(res), "%dx%d", &width, &height); err != nil || width <= 0 || height <= 0 {
 		return fmt.Errorf("invalid -res %q, expected e.g. 1920x1080", res)
@@ -167,7 +175,7 @@ func start(name, res string, fps, port int, debug bool, dir string, logger *log.
 	g.dec = video.NewDecoder(ffmpeg, win.SetFrame, logger)
 
 	srv := airplay.NewServer(airplay.Config{
-		Name: name, HWAddr: hw, Identity: key,
+		Name: name, HWAddr: hw, Identity: key, HEVC: hevc,
 		Width: width, Height: height, FPS: fps, Port: port, Log: logger,
 	}, g)
 
@@ -184,7 +192,8 @@ func start(name, res string, fps, port int, debug bool, dir string, logger *log.
 	cleanupMu.Lock()
 	cleanup = func() { responder.Close(); srv.Close(); g.dec.Stop() }
 	cleanupMu.Unlock()
-	logger.Printf("AirPlay receiver %q ready on port %d (device id %s)", name, port, srv.DeviceID())
+	logger.Printf("AirPlay receiver %q ready on port %d (device id %s, requesting %dx%d@%d, hevc=%v)",
+		name, port, srv.DeviceID(), width, height, fps, hevc)
 	if err := srv.Serve(); err != nil {
 		return fmt.Errorf("AirPlay server: %w", err)
 	}

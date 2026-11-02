@@ -19,4 +19,6 @@ AirPlay screen-mirroring receiver for Windows (Go + cgo), shows the iPhone in a 
 ## Gotchas
 - Never pass `-fflags nobuffer` to ffmpeg: with ffmpeg 8 it stalls pipe output. Latency is about 40ms with `-flags low_delay`.
 - The FairPlay handshake message byte 12 (mode) must be 0..3, otherwise playfair reads out of bounds (UB).
+- HEVC is on by default (features bit 42). Without it, iOS caps mirroring at 1080 pixels high. A real iPhone 15 Pro Max on iOS 27 sends HEVC at 998x2160 and ~50 fps.
+- The fake sender takes over from a connected iPhone. Check the log for an active session before running it.
 - Python edits on Windows write CRLF. Run `gofmt -w .` afterwards.

@@ -1,5 +1,5 @@
-// Package video decodes the mirrored H.264 stream into BGRA frames using an
-// ffmpeg child process.
+// Package video decodes the mirrored H.264/H.265 stream into BGRA frames using
+// an ffmpeg child process.
 package video
 
 import (
@@ -14,6 +14,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
+)
+
+// Codec names double as ffmpeg input format names.
+const (
+	H264 = "h264"
+	HEVC = "hevc"
 )
 
 // FrameSink receives decoded frames. It returns a buffer that the decoder may
@@ -28,6 +35,7 @@ type Decoder struct {
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
+	codec  string
 	width  int
 	height int
 	gen    atomic.Int64 // bumped whenever ffmpeg is restarted, so stale frames are dropped
@@ -56,24 +64,40 @@ func NewDecoder(ffmpegPath string, sink FrameSink, logger *log.Logger) *Decoder 
 	return &Decoder{ffmpeg: ffmpegPath, sink: sink, log: logger}
 }
 
-// Configure is called with each new SPS/PPS. It (re)starts ffmpeg when the
-// frame size changes (e.g. the phone is rotated) and feeds the parameter sets.
-func (d *Decoder) Configure(sps, pps []byte) error {
-	w, h, err := ParseSPSSize(sps)
+// Configure is called with each new set of parameter sets (SPS/PPS, plus VPS
+// for HEVC). It (re)starts ffmpeg when the codec or frame size changes (e.g.
+// the phone is rotated) and feeds the parameter sets to the decoder.
+func (d *Decoder) Configure(codec string, paramSets [][]byte) error {
+	w, h, err := frameSize(codec, paramSets)
 	if err != nil {
 		return err
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.cmd == nil || w != d.width || h != d.height {
+	if d.cmd == nil || codec != d.codec || w != d.width || h != d.height {
 		d.stopLocked()
-		if err := d.startLocked(w, h); err != nil {
+		if err := d.startLocked(codec, w, h); err != nil {
 			return err
 		}
-		d.log.Printf("decoder: started for %dx%d", w, h)
+		d.log.Printf("decoder: started %s %dx%d", codec, w, h)
 	}
-	buf := append(append(append([]byte{0, 0, 0, 1}, sps...), 0, 0, 0, 1), pps...)
+	var buf []byte
+	for _, ps := range paramSets {
+		buf = append(append(buf, 0, 0, 0, 1), ps...)
+	}
 	return d.writeLocked(buf)
+}
+
+func frameSize(codec string, paramSets [][]byte) (int, int, error) {
+	for _, ps := range paramSets {
+		switch {
+		case codec == H264 && len(ps) > 0 && ps[0]&0x1f == 7:
+			return ParseSPSSize(ps)
+		case codec == HEVC && len(ps) > 0 && (ps[0]>>1)&0x3f == 33:
+			return ParseHEVCSPSSize(ps)
+		}
+	}
+	return 0, 0, fmt.Errorf("no %s SPS in codec configuration", codec)
 }
 
 // Write feeds one Annex-B access unit to the decoder.
@@ -118,13 +142,19 @@ var ffmpegArgs = []string{
 	"-hide_banner", "-loglevel", "error",
 	"-flags", "low_delay",
 	"-probesize", "32", "-analyzeduration", "0",
-	"-f", "h264", "-i", "pipe:0",
+	"-f", "{codec}", "-i", "pipe:0",
 	"-fps_mode", "passthrough",
 	"-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1",
 }
 
-func (d *Decoder) startLocked(w, h int) error {
-	cmd := exec.Command(d.ffmpeg, ffmpegArgs...)
+func (d *Decoder) startLocked(codec string, w, h int) error {
+	args := append([]string(nil), ffmpegArgs...)
+	for i, a := range args {
+		if a == "{codec}" {
+			args[i] = codec
+		}
+	}
+	cmd := exec.Command(d.ffmpeg, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -141,7 +171,7 @@ func (d *Decoder) startLocked(w, h int) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
-	d.cmd, d.stdin, d.width, d.height = cmd, stdin, w, h
+	d.cmd, d.stdin, d.codec, d.width, d.height = cmd, stdin, codec, w, h
 	gen := d.gen.Add(1)
 	go func() {
 		sc := bufio.NewScanner(stderr)
@@ -149,19 +179,24 @@ func (d *Decoder) startLocked(w, h int) error {
 			d.log.Printf("ffmpeg: %s", sc.Text())
 		}
 	}()
-	go d.readFrames(bufio.NewReaderSize(stdout, 1<<20), w, h, gen)
+	go d.readFrames(bufio.NewReaderSize(stdout, 1<<20), codec, w, h, gen)
 	return nil
 }
 
-func (d *Decoder) readFrames(r io.Reader, w, h int, gen int64) {
+func (d *Decoder) readFrames(r io.Reader, codec string, w, h int, gen int64) {
 	size := w * h * 4
 	buf := make([]byte, size)
+	frames, since := 0, time.Now()
 	for {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return
 		}
 		if d.gen.Load() != gen {
 			return
+		}
+		if frames++; time.Since(since) >= 10*time.Second {
+			d.log.Printf("video: %s %dx%d, %.1f fps (last %.0fs)", codec, w, h, float64(frames)/time.Since(since).Seconds(), time.Since(since).Seconds())
+			frames, since = 0, time.Now()
 		}
 		recycled := d.sink(w, h, buf)
 		if cap(recycled) >= size {

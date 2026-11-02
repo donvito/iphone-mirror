@@ -1,6 +1,7 @@
 package airplay
 
 import (
+	"bytes"
 	"crypto/cipher"
 	"crypto/sha512"
 	"encoding/binary"
@@ -140,18 +141,18 @@ func (m *mirrorStream) run() {
 			if m.active() {
 				sink.VideoData(out)
 			}
-		case 1: // codec configuration (avcC)
+		case 1: // codec configuration: avcC record (H.264) or hvc1 sample entry (H.265)
 			if size == 0 {
-				log.Printf("mirror: client sent a non-H.264 stream, which is not supported")
+				log.Printf("mirror: client sent an unsupported codec (enable HEVC support)")
 				continue
 			}
-			sps, pps, err := parseAVCC(payload)
+			codec, paramSets, err := parseCodecConfig(payload)
 			if err != nil {
 				log.Printf("mirror: %v", err)
 				continue
 			}
 			if m.active() {
-				sink.CodecConfig(sps, pps)
+				sink.CodecConfig(codec, paramSets)
 			}
 		}
 	}
@@ -175,6 +176,57 @@ func avccToAnnexB(dst, src []byte) ([]byte, error) {
 		src = src[n:]
 	}
 	return dst, nil
+}
+
+// parseCodecConfig returns the codec and its parameter set NAL units.
+func parseCodecConfig(b []byte) (codec string, paramSets [][]byte, err error) {
+	if len(b) >= 8 && string(b[4:8]) == "hvc1" {
+		ps, err := parseHVC1(b)
+		return CodecHEVC, ps, err
+	}
+	sps, pps, err := parseAVCC(b)
+	return CodecH264, [][]byte{sps, pps}, err
+}
+
+// parseHVC1 extracts the VPS/SPS/PPS from an 'hvc1' sample entry box, which
+// contains an 'hvcC' box (HEVCDecoderConfigurationRecord).
+func parseHVC1(b []byte) ([][]byte, error) {
+	i := bytes.Index(b, []byte("hvcC"))
+	if i < 4 {
+		return nil, errors.New("hvc1 entry without hvcC box")
+	}
+	rec := b[i+4:]
+	if boxSize := int(binary.BigEndian.Uint32(b[i-4:])); boxSize >= 8 && boxSize-8 <= len(rec) {
+		rec = rec[:boxSize-8]
+	}
+	if len(rec) < 23 {
+		return nil, errors.New("truncated hvcC record")
+	}
+	numArrays := int(rec[22])
+	p := rec[23:]
+	var out [][]byte
+	for a := 0; a < numArrays; a++ {
+		if len(p) < 3 {
+			return nil, errors.New("truncated hvcC array")
+		}
+		n := int(binary.BigEndian.Uint16(p[1:3]))
+		p = p[3:]
+		for k := 0; k < n; k++ {
+			if len(p) < 2 {
+				return nil, errors.New("truncated hvcC NAL length")
+			}
+			l := int(binary.BigEndian.Uint16(p))
+			if len(p) < 2+l {
+				return nil, errors.New("truncated hvcC NAL unit")
+			}
+			out = append(out, append([]byte(nil), p[2:2+l]...))
+			p = p[2+l:]
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("hvcC has no parameter sets")
+	}
+	return out, nil
 }
 
 // parseAVCC extracts the first SPS and PPS from an AVCDecoderConfigurationRecord.

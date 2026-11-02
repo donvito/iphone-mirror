@@ -35,7 +35,7 @@ func TestDecoderLatency(t *testing.T) {
 		mu.Unlock()
 		return b
 	}, log.New(io.Discard, "", 0))
-	if err := d.Configure(sps, pps); err != nil {
+	if err := d.Configure(H264, [][]byte{sps, pps}); err != nil {
 		t.Fatal(err)
 	}
 	var sent []time.Time
